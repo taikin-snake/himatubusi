@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>My Spreadsheet Data</title>
+</head>
+<body>
+    <h1>Spreadsheet Data</h1>
+    <div id="data"></div>
+
+    <script>
+        // GASのWebアプリケーションからデータを取得する
+        fetch('https://script.google.com/macros/s/AKfycbznZcaAYUehQGnXEwrGruUcLqAkA2fsipoWRfDMRZ2XitLjCIZLdVYcJ47GcEl34eTlLA/exec')
+            .then(response => response.json()) // レスポンスをJSONとして解析
+            .then(data => {
+                // 取得したデータをHTMLに表示
+                document.getElementById('data').innerHTML = JSON.stringify(data, null, 2);
+            })
+            .catch(error => console.error('Error:', error)); // エラー処理
+    </script>
+</body>
+</html>

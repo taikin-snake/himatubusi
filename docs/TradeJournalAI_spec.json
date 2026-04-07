@@ -1,0 +1,430 @@
+{
+  "spec_version": "1.1",
+  "project": {
+    "name": "TradeJournalAI",
+    "type": "iOS app",
+    "primary_goal": "AIの売買判断（理由付き）を記録し、記録時株価も保存し、週次で勝率/損益などを振り返れるようにする（投資助言ではなくジャーナリング）",
+    "language": "ja-JP",
+    "timezone_default": "Asia/Tokyo"
+  },
+  "platform": {
+    "os": "iOS",
+    "min_ios_version": "17.0",
+    "ui_framework": "SwiftUI",
+    "persistence": "SwiftData",
+    "networking": "URLSession"
+  },
+  "decisions_confirmed_by_user": {
+    "week_start": "monday",
+    "evaluation_horizons_days": [7, 30],
+    "evaluation_price_type": "close",
+    "ticker_format_primary": "8053.T"
+  },
+  "core_concepts": {
+    "record": "1銘柄に対するAI/自分の判断ログ（買い/売り/見送り）",
+    "weekly_review": "週単位での集計と評価（勝率・損益率等）",
+    "evaluation": "記録日基準で 7日後/30日後 の終値を取得し、買い/売りの正否と損益を判定",
+    "ai_template": "AIへ投げる/AI出力をコピペするためのテンプレ（JSON/箇条書き）"
+  },
+  "data_source_policy": {
+    "selected_provider_default": "TwelveData",
+    "backup_provider": "AlphaVantage",
+    "manual_mode": true,
+    "notes": [
+      "MVPは外部プロバイダ(TwelveData/AlphaVantage)または手入力で設計",
+      "プロバイダは差し替え可能（PriceProviderプロトコル＋Factory）",
+      "APIキーは端末内保存（MVP: AppStorage、将来: Keychain）",
+      "7日後/30日後の『終値』取得のため、日足OHLC取得（時系列）を使う"
+    ]
+  },
+  "evaluation_rules": {
+    "base_date_priority": ["recordedPriceAt", "createdAt"],
+    "target_date": {
+      "horizon_days": [7, 30],
+      "formula": "baseDate + horizonDays"
+    },
+    "non_trading_day_policy_default": {
+      "policy": "next_trading_day_on_or_after_target",
+      "search_window_days": 7,
+      "notes": "targetDateが土日/祝日等で終値が存在しない場合、targetDate以降で最初に見つかる取引日の終値を採用。見つからない場合は未評価扱い。"
+    },
+    "outcome_logic": {
+      "preconditions": [
+        "action != 見送り",
+        "recordedPrice != null",
+        "closePriceAtHorizon != null"
+      ],
+      "buy": "closePriceAtHorizon > recordedPrice => 的中 else 外れ",
+      "sell": "closePriceAtHorizon < recordedPrice => 的中 else 外れ",
+      "skip": "未評価（勝率計算の分母に含めない）"
+    },
+    "pnl_percent_logic": {
+      "buy": "(closePriceAtHorizon - recordedPrice) / recordedPrice",
+      "sell": "(recordedPrice - closePriceAtHorizon) / recordedPrice",
+      "skip": "null"
+    }
+  },
+  "integrations": {
+    "price_provider": {
+      "interface_name": "PriceProvider",
+      "methods": [
+        {
+          "name": "fetchLatestQuote",
+          "purpose": "記録時株価の自動入力（現在値/高値/安値/タイムスタンプ）",
+          "input": { "symbol": "string (例: 8053.T)" },
+          "output": {
+            "price": "number",
+            "high": "number|null",
+            "low": "number|null",
+            "timestamp": "datetime|null"
+          }
+        },
+        {
+          "name": "fetchDailyOHLC",
+          "purpose": "7日後/30日後の終値（close）取得のための日足OHLC取得",
+          "input": {
+            "symbol": "string",
+            "from": "date",
+            "to": "date"
+          },
+          "output": "array of { date: YYYY-MM-DD, open:number, high:number, low:number, close:number }"
+        }
+      ],
+      "implementations": [
+        {
+          "name": "ManualPriceProvider",
+          "behavior": "ネット取得せず、ユーザー手入力のみ（評価も手入力）"
+        },
+        {
+          "name": "TwelveDataPriceProvider",
+          "behavior": "latest quote と time series（日足）を取得して評価",
+          "api_key_required": true
+        },
+        {
+          "name": "AlphaVantagePriceProvider",
+          "behavior": "latest quote（代替）と日足時系列を取得して評価",
+          "api_key_required": true
+        }
+      ],
+      "factory": {
+        "name": "PriceProviderFactory",
+        "inputs": ["selected_source", "api_key"],
+        "outputs": "PriceProvider implementation"
+      }
+    }
+  },
+  "data_model": {
+    "entities": [
+      {
+        "entity": "TradeRecord",
+        "fields": [
+          { "name": "id", "type": "uuid", "required": true },
+          { "name": "createdAt", "type": "datetime", "required": true },
+
+          { "name": "stockName", "type": "string", "required": true, "example": "住友商事" },
+          { "name": "stockCode", "type": "string", "required": false, "example": "8053" },
+          { "name": "ticker", "type": "string", "required": false, "example": "8053.T" },
+
+          { "name": "action", "type": "enum", "required": true, "enum_values": ["買い", "売り", "見送り"] },
+          { "name": "confidence", "type": "number", "required": true, "range": [0.0, 1.0], "example": 1.0 },
+
+          { "name": "summary", "type": "string", "required": false },
+
+          { "name": "rationale", "type": "string[]", "required": false, "ui_rule": "1行=1項目" },
+          { "name": "catalyst", "type": "string[]", "required": false, "ui_rule": "1行=1項目" },
+          { "name": "invalidation", "type": "string[]", "required": false, "ui_rule": "1行=1項目" },
+
+          { "name": "riskPlan_entry", "type": "string", "required": false, "default": "未設定" },
+          { "name": "riskPlan_stop", "type": "string", "required": false, "default": "未設定" },
+          { "name": "riskPlan_takeProfit", "type": "string", "required": false, "default": "未設定" },
+          { "name": "riskPlan_size", "type": "string", "required": false, "default": "未設定" },
+
+          { "name": "timeHorizon", "type": "enum", "required": true, "enum_values": ["POSITION", "SWING", "DAY"], "default": "POSITION" },
+          { "name": "emotion", "type": "enum", "required": true, "enum_values": ["CALM", "ANXIOUS", "EXCITED", "UNSURE"], "default": "CALM" },
+
+          { "name": "tags", "type": "string[]", "required": false, "example": ["商社", "バリュー"] },
+
+          { "name": "recordedPrice", "type": "number|null", "required": false, "example": 5412 },
+          { "name": "recordedHigh", "type": "number|null", "required": false, "example": 5480 },
+          { "name": "recordedLow", "type": "number|null", "required": false, "example": 5412 },
+          { "name": "recordedPriceAt", "type": "datetime|null", "required": false }
+        ],
+        "relationships": [
+          {
+            "name": "evaluations",
+            "type": "one_to_many",
+            "target": "TradeEvaluation",
+            "notes": "7日/30日など評価の拡張性のため別テーブル化"
+          }
+        ]
+      },
+      {
+        "entity": "TradeEvaluation",
+        "fields": [
+          { "name": "id", "type": "uuid", "required": true },
+          { "name": "recordId", "type": "uuid", "required": true },
+
+          { "name": "horizonDays", "type": "number", "required": true, "allowed_values": [7, 30] },
+          { "name": "baseDateUsed", "type": "datetime", "required": true },
+          { "name": "targetDate", "type": "date", "required": true },
+          {
+            "name": "resolvedTradingDate",
+            "type": "date|null",
+            "required": false,
+            "notes": "非取引日の場合に採用した取引日（targetDate以上の最初の取引日）"
+          },
+
+          { "name": "closePrice", "type": "number|null", "required": false },
+          { "name": "evaluatedAt", "type": "datetime|null", "required": false },
+
+          { "name": "outcome", "type": "enum", "required": true, "enum_values": ["未評価", "的中", "外れ"], "default": "未評価" },
+          {
+            "name": "pnlPercent",
+            "type": "derived|null",
+            "required": false,
+            "definition": "buy/sellロジックに従い closePrice と recordedPrice から算出"
+          }
+        ]
+      }
+    ]
+  },
+  "settings": {
+    "storage": "AppStorage (MVP), future: Keychain",
+    "keys": [
+      { "key": "price_source", "type": "enum", "values": ["手入力", "Twelve Data", "Alpha Vantage"], "default": "手入力" },
+      { "key": "price_api_key", "type": "string", "default": "" },
+      {
+        "key": "review_horizon_selected",
+        "type": "enum",
+        "values": ["7", "30"],
+        "default": "7",
+        "notes": "週次レビューの表示対象（7日後 or 30日後）"
+      }
+    ]
+  },
+  "screens": [
+    {
+      "name": "TabRoot",
+      "type": "tab",
+      "tabs": ["入力", "記録", "レビュー"]
+    },
+    {
+      "name": "入力",
+      "type": "screen",
+      "components": [
+        { "type": "button", "label": "新規記録を作成", "action": "open RecordEditor(create)" },
+        { "type": "link", "label": "AIテンプレ（JSON/箇条書き）", "action": "open AITemplates" }
+      ]
+    },
+    {
+      "name": "AIテンプレ",
+      "type": "screen",
+      "components": [
+        { "type": "text_block", "label": "JSONテンプレ", "selectable": true },
+        { "type": "copy_button", "label": "JSONをコピー" },
+        { "type": "text_block", "label": "箇条書きテンプレ", "selectable": true },
+        { "type": "copy_button", "label": "箇条書きをコピー" }
+      ],
+      "templates": {
+        "json_template_fields": [
+          "stockName",
+          "stockCode",
+          "ticker",
+          "action",
+          "confidence",
+          "summary",
+          "rationale[]",
+          "catalyst[]",
+          "invalidation[]",
+          "riskPlan{entry,stop,takeProfit,size}",
+          "horizon",
+          "emotion",
+          "tags[]"
+        ],
+        "bullet_template_sections": [
+          "銘柄",
+          "判断",
+          "サマリー",
+          "根拠",
+          "カタリスト",
+          "無効化条件",
+          "リスク計画",
+          "時間軸",
+          "感情",
+          "タグ"
+        ]
+      }
+    },
+    {
+      "name": "記録一覧",
+      "type": "screen",
+      "components": [
+        { "type": "list", "data": "TradeRecord sorted by createdAt desc" },
+        { "type": "swipe_delete", "enabled": true }
+      ],
+      "navigation": [{ "on_select": "open RecordDetail" }]
+    },
+    {
+      "name": "記録詳細",
+      "type": "screen",
+      "components": [
+        { "type": "header", "fields": ["stockName", "stockCode", "ticker", "action"] },
+        { "type": "section", "title": "サマリー", "field": "summary" },
+        { "type": "section", "title": "根拠", "field": "rationale[]" },
+        { "type": "section", "title": "カタリスト", "field": "catalyst[]" },
+        { "type": "section", "title": "無効化条件", "field": "invalidation[]" },
+        { "type": "section", "title": "リスク計画", "fields": ["riskPlan_entry", "riskPlan_stop", "riskPlan_takeProfit", "riskPlan_size"] },
+        { "type": "section", "title": "時間軸", "field": "timeHorizon" },
+        { "type": "section", "title": "感情状態", "field": "emotion" },
+        { "type": "section", "title": "タグ", "field": "tags[]" },
+        { "type": "section", "title": "記録時の株価", "fields": ["recordedPrice", "recordedHigh", "recordedLow", "recordedPriceAt"] },
+        {
+          "type": "section",
+          "title": "評価（7日後/30日後）",
+          "fields": [
+            "evaluations[horizonDays=7]{targetDate,resolvedTradingDate,closePrice,outcome,pnlPercent,evaluatedAt}",
+            "evaluations[horizonDays=30]{targetDate,resolvedTradingDate,closePrice,outcome,pnlPercent,evaluatedAt}"
+          ]
+        }
+      ],
+      "toolbar": [
+        { "type": "button", "icon": "pencil", "action": "open RecordEditor(edit)" },
+        { "type": "button", "icon": "trash", "action": "delete record", "destructive": true }
+      ]
+    },
+    {
+      "name": "RecordEditor",
+      "type": "screen_modal",
+      "modes": ["create", "edit"],
+      "components": [
+        { "type": "form", "sections": ["銘柄", "判断", "サマリー", "根拠", "カタリスト", "無効化条件", "リスク計画", "メタ", "記録時の株価"] },
+        { "type": "save_button", "action": "validate -> persist" },
+        { "type": "cancel_button", "action": "dismiss" }
+      ],
+      "stock_price_autofill": {
+        "enabled": true,
+        "rule": "Settings.price_sourceがmanual以外の場合、APIで取得してrecordedPrice/high/low/timestampをセットするボタンを表示"
+      }
+    },
+    {
+      "name": "週次レビュー",
+      "type": "screen",
+      "components": [
+        { "type": "week_pager", "behavior": "前週/次週へ移動", "week_start": "monday" },
+        {
+          "type": "segmented_control",
+          "label": "評価期間",
+          "values": ["7日後", "30日後"],
+          "bind_to": "Settings.review_horizon_selected",
+          "notes": "以後の勝率/損益などの指標は選択された評価期間のTradeEvaluationのみで算出"
+        },
+        { "type": "button", "label": "週次レポート作成（自動評価）", "action": "open WeeklyAutoEval" },
+        { "type": "card", "title": "サマリー", "fields": ["記録数", "判断数", "平均信頼度", "買い数", "売り数", "見送り数"] },
+        { "type": "card", "title": "損益", "fields": ["合計損益率", "平均損益率"] },
+        { "type": "card", "title": "勝率・的中率", "fields": ["総合勝率", "的中数", "外れ数", "未評価数"] }
+      ],
+      "toolbar": [{ "type": "link", "icon": "gearshape", "action": "open Settings" }]
+    },
+    {
+      "name": "週次レポート作成",
+      "type": "screen_modal",
+      "modes": ["manual_input", "api_fetch"],
+      "mode_selection_rule": "Settings.price_sourceがmanualならmanual_input、それ以外ならapi_fetch",
+      "components": [
+        {
+          "type": "picker",
+          "label": "評価対象",
+          "values": ["7日後", "30日後", "両方"],
+          "default": "両方",
+          "notes": "評価はTradeEvaluationとして保存（既存があれば上書きor再計算の挙動を定義）"
+        },
+        { "type": "list", "data": "week records" },
+        {
+          "type": "manual_input",
+          "fields": [
+            "horizon=7: closePrice input per record",
+            "horizon=30: closePrice input per record"
+          ],
+          "action": "evaluate"
+        },
+        {
+          "type": "api_fetch",
+          "action": "fetch daily OHLC around targetDate -> resolve trading day -> set closePrice -> evaluate",
+          "rate_limit_mitigation": "optional delay between requests",
+          "fetch_window_policy": "from = targetDate-7d, to = targetDate+7d（最低）"
+        }
+      ]
+    },
+    {
+      "name": "設定",
+      "type": "screen",
+      "components": [
+        { "type": "picker", "field": "price_source", "values": ["手入力", "Twelve Data", "Alpha Vantage"] },
+        { "type": "secure_input", "field": "price_api_key", "visible_when": "price_source != 手入力" }
+      ]
+    }
+  ],
+  "business_logic": {
+    "weekly_window": {
+      "definition": "ISO週（週の開始=月曜）",
+      "include_rule": "createdAt >= weekStart AND createdAt < weekEnd"
+    },
+    "metrics": {
+      "judgement_count": "action != 見送り の件数",
+      "avg_confidence": "judgement_count>0 の場合の平均(confidence)",
+      "hit_rate_selected_horizon": "選択されたhorizonDaysの TradeEvaluation について、的中 / (的中 + 外れ)（未評価は除外）",
+      "weekly_total_pnl_selected_horizon": "週内レコードの選択horizonDaysにおける評価済み pnlPercent の合計",
+      "weekly_avg_pnl_selected_horizon": "週内レコードの選択horizonDaysにおける評価済み pnlPercent の平均"
+    },
+    "idempotency": {
+      "evaluation_unique_key": "recordId + horizonDays",
+      "default_behavior": "既に評価がある場合は再取得して上書き（MVP）。将来: 強制更新トグル/キャッシュ制御。"
+    }
+  },
+  "non_functional_requirements": {
+    "privacy": [
+      "APIキーは端末内保存（MVP: AppStorage、将来: Keychain）",
+      "外部送信は株価取得のHTTPリクエストのみ（ユーザーの記録本文は外部送信しない）"
+    ],
+    "reliability": [
+      "API失敗時はエラー表示しつつ他銘柄の評価は継続可能",
+      "レート制限対策としてリクエスト間に短いdelayを入れられる"
+    ],
+    "performance": [
+      "週次評価は銘柄数が多いと時間がかかるため進捗表示（isFetching）を用意"
+    ],
+    "localization": [
+      "UI文言は日本語",
+      "日付表示はja-JP",
+      "週の表示は月曜始まり"
+    ],
+    "accessibility": [
+      "Dynamic Type対応（標準コンポーネント優先）"
+    ]
+  },
+  "acceptance_criteria": [
+    "新規記録を作成し、詳細で入力項目が表示される",
+    "記録時株価を保存できる（手入力またはAPI取得ボタン）",
+    "週次レビューで週範囲を月曜始まりで切り替えできる",
+    "週次レビューで評価期間（7日後/30日後）を切替でき、指標が切り替わる",
+    "週次レポート作成で manual モードは（7/30/両方の）終値を手入力して評価できる",
+    "週次レポート作成で API モードは日足時系列から（7/30/両方の）終値を取得して評価できる（少数銘柄で動作確認）",
+    "非取引日の場合、targetDate以降の最初の取引日の終値で評価される",
+    "AIテンプレ（JSON/箇条書き）を画面表示し、コピーできる",
+    "PriceProviderは設定画面の選択で差し替えられる"
+  ],
+  "out_of_scope_for_mvp": [
+    "実売買の実行機能",
+    "証券口座ログイン連携",
+    "通知/アラート",
+    "クラウド同期（iCloud/サーバー）"
+  ],
+  "future_extensions": [
+    "AI出力JSON貼り付け→フォーム自動入力（パーサ実装）",
+    "検索/フィルタ（タグ/判断種別）",
+    "CSV/Markdownエクスポート",
+    "KeychainでAPIキー保護",
+    "評価の非取引日ポリシーを選択式に（前営業日/翌営業日/最寄りなど）",
+    "終値以外（VWAP/高値/安値等）での評価指標追加"
+  ]
+}
